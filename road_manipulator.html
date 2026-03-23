@@ -256,7 +256,11 @@
 
   <div id="output-section">
     <div id="output-section-header">
-      <label>JSX Output</label>
+      <label>Output</label>
+      <select id="export-format" style="font-size:10px;padding:1px 4px;background:#1a1e2a;color:#ccc;border:1px solid #334;border-radius:3px;">
+        <option value="jsx">JSX</option>
+        <option value="vector3">Vector3</option>
+      </select>
       <button id="btn-copy-small" style="font-size:10px;padding:2px 7px;">copy</button>
     </div>
     <textarea id="output" readonly spellcheck="false"></textarea>
@@ -272,16 +276,17 @@
   </div>
   <div id="hint-bar">
     Scroll to zoom &nbsp;|&nbsp; Middle-drag or Space+drag to pan<br>
-    Right-click point to delete &nbsp;|&nbsp; R-key adds new road
+    Right-click point to delete &nbsp;|&nbsp; R-key adds new road<br>
+    Double-click or Enter to finish new road &nbsp;|&nbsp; Esc to cancel
   </div>
 </div>
 
 <!-- ── Import modal ────────────────────────────────── -->
 <div id="import-overlay">
   <div id="import-box">
-    <h3>Import JSX</h3>
-    <p>Paste lines containing <code>&lt;BgCurvedRoad points={...} width={...} /&gt;</code></p>
-    <textarea id="import-textarea" spellcheck="false" placeholder="Paste JSX here..."></textarea>
+    <h3>Import Roads</h3>
+    <p>Paste <code>&lt;BgCurvedRoad&gt;</code> JSX <em>or</em> <code>new THREE.Vector3(...)</code> arrays</p>
+    <textarea id="import-textarea" spellcheck="false" placeholder="Paste JSX or Vector3 arrays here..."></textarea>
     <div class="btn-row">
       <button id="btn-import-cancel">Cancel</button>
       <button id="btn-import-confirm" style="background:#1a5a8a;border-color:#4db8ff;">Import</button>
@@ -349,11 +354,48 @@ function parseJSX(text) {
   return results;
 }
 
+// ── Parse THREE.Vector3 arrays ──────────────────
+function parseVector3(text) {
+  const results = [];
+  // Match variable declarations containing arrays of new THREE.Vector3(...)
+  // Split on blank lines or variable declarations to separate road arrays
+  const blockRe = /(?:const|let|var)\s+(\w+)\s*=\s*\[([\s\S]*?)\];/g;
+  let block;
+  while ((block = blockRe.exec(text)) !== null) {
+    const varName = block[1];
+    const body = block[2];
+    const ptRe = /new\s+THREE\.Vector3\(\s*([+-]?\d+\.?\d*)\s*,\s*([+-]?\d+\.?\d*)\s*,\s*([+-]?\d+\.?\d*)\s*\)/g;
+    const pts = [];
+    let pm;
+    while ((pm = ptRe.exec(body)) !== null) {
+      // xz-plane: Vector3(x, y_up, z) → 2D (x, z)
+      pts.push([parseFloat(pm[1]), parseFloat(pm[3])]);
+    }
+    if (pts.length >= 2) {
+      results.push({ pts, w: 2.5, name: varName });
+    }
+  }
+  // Also handle bare arrays without variable declaration (just a list of Vector3)
+  if (results.length === 0) {
+    const ptRe = /new\s+THREE\.Vector3\(\s*([+-]?\d+\.?\d*)\s*,\s*([+-]?\d+\.?\d*)\s*,\s*([+-]?\d+\.?\d*)\s*\)/g;
+    const pts = [];
+    let pm;
+    while ((pm = ptRe.exec(text)) !== null) {
+      pts.push([parseFloat(pm[1]), parseFloat(pm[3])]);
+    }
+    if (pts.length >= 2) {
+      results.push({ pts, w: 2.5, name: 'curvePoints' });
+    }
+  }
+  return results;
+}
+
 function loadRoads(parsed) {
   roads = parsed.map((r, i) => ({
     points: r.pts.map(p => [p[0], p[1]]),
     width: r.w,
-    color: ROAD_COLORS[i % ROAD_COLORS.length]
+    color: ROAD_COLORS[i % ROAD_COLORS.length],
+    name: r.name || ''
   }));
   selectedRoad = -1;
   selectedPoint = -1;
@@ -372,6 +414,23 @@ function toJSX() {
     ).join(', ');
     return `<BgCurvedRoad points={[${pts}]} width={${r.width}} />`;
   }).join('\n');
+}
+
+function toVector3() {
+  return roads.map((r, i) => {
+    const name = r.name || `curvePoints${i > 0 ? i + 1 : ''}`;
+    const pts = r.points.map(p => {
+      const x = Math.round(p[0]*10)/10;
+      const z = Math.round(p[1]*10)/10;
+      return `  new THREE.Vector3(${x}, 0, ${z}),`;
+    }).join('\n');
+    return `const ${name} = [\n${pts}\n];`;
+  }).join('\n\n');
+}
+
+function getOutput() {
+  const fmt = document.getElementById('export-format').value;
+  return fmt === 'vector3' ? toVector3() : toJSX();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -763,25 +822,33 @@ canvas.addEventListener('wheel', e => {
 
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 
-// Double-click to finish new road
-canvas.addEventListener('dblclick', e => {
+// Finish new road helper
+function finishNewRoad() {
   if (mode === 'add-road' && newRoadPoints.length >= 2) {
-    // remove duplicate last point (dblclick fires two clicks)
-    newRoadPoints.pop();
-    if (newRoadPoints.length >= 2) {
-      roads.push({
-        points: newRoadPoints,
-        width: 2,
-        color: ROAD_COLORS[roads.length % ROAD_COLORS.length]
-      });
-      selectedRoad = roads.length - 1;
-      selectedPoint = -1;
-    }
+    roads.push({
+      points: newRoadPoints.slice(),
+      width: 2,
+      color: ROAD_COLORS[roads.length % ROAD_COLORS.length],
+      name: ''
+    });
+    selectedRoad = roads.length - 1;
+    selectedPoint = -1;
     newRoadPoints = [];
     setMode('select');
     refreshSidebar();
     refreshOutput();
     render();
+  }
+}
+
+// Double-click to finish new road
+canvas.addEventListener('dblclick', e => {
+  if (mode === 'add-road' && newRoadPoints.length >= 2) {
+    // dblclick fires two mousedown events before it, each adding a point;
+    // remove both duplicates so the road ends at the last intentional click
+    newRoadPoints.pop();
+    newRoadPoints.pop();
+    finishNewRoad();
   }
 });
 
@@ -796,6 +863,7 @@ document.addEventListener('keydown', e => {
   if (e.key === 'd' || e.key === 'D') setMode('del-point');
   if (e.key === 'r' || e.key === 'R') setMode('add-road');
   if (e.key === '0') resetView();
+  if (e.key === 'Enter') { finishNewRoad(); }
   if (e.key === 'Escape') {
     if (mode === 'add-road') { newRoadPoints = []; setMode('select'); render(); }
     else { selectedRoad = -1; selectedPoint = -1; refreshSidebar(); render(); }
@@ -942,8 +1010,9 @@ function deleteRoad(ri) {
 }
 
 function refreshOutput() {
-  document.getElementById('output').value = toJSX();
+  document.getElementById('output').value = getOutput();
 }
+document.getElementById('export-format').onchange = refreshOutput;
 
 // ═══════════════════════════════════════════════════════════════
 // Toolbar buttons
@@ -969,14 +1038,15 @@ document.getElementById('btn-import-cancel').onclick = () => {
 };
 document.getElementById('btn-import-confirm').onclick = () => {
   const text = document.getElementById('import-textarea').value;
-  const parsed = parseJSX(text);
-  if (parsed.length === 0) { alert('No BgCurvedRoad elements found.'); return; }
+  let parsed = parseJSX(text);
+  if (parsed.length === 0) parsed = parseVector3(text);
+  if (parsed.length === 0) { alert('No roads found. Paste BgCurvedRoad JSX or THREE.Vector3 arrays.'); return; }
   loadRoads(parsed);
   document.getElementById('import-overlay').classList.remove('open');
 };
 
 function copyToClipboard() {
-  const text = toJSX();
+  const text = getOutput();
   navigator.clipboard.writeText(text).then(() => {
     const btn = document.getElementById('btn-copy');
     btn.textContent = '✓ Copied';
