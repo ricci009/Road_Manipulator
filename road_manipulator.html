@@ -191,6 +191,21 @@
       line-height: 1.7;
     }
 
+    /* ── Auto-save indicator ─────────────────────── */
+    #autosave-indicator {
+      position: absolute;
+      bottom: 8px;
+      right: 8px;
+      background: rgba(0,0,0,0.55);
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 10px;
+      color: #445;
+      pointer-events: none;
+      transition: opacity 0.3s;
+    }
+    #autosave-indicator.flash { color: #5fffb0; }
+
     /* ── Import modal ──────────────────────────── */
     #import-overlay {
       display: none;
@@ -239,7 +254,11 @@
     <button id="btn-add-road" title="Click canvas to start a new road (R)">＋ Road</button>
     <button id="btn-import" title="Paste JSX to import">⬆ Import</button>
     <button id="btn-copy" title="Copy JSX to clipboard">⬇ Copy</button>
+    <button id="btn-load-file" title="Load a .md or .jsx file">📂 Load File</button>
+    <button id="btn-save-file" title="Export roads to a file">💾 Save File</button>
     <button id="btn-reset-view" title="Reset pan/zoom (0)">⌖ View</button>
+    <button id="btn-reset-data" class="danger" title="Clear auto-saved data and reload example roads">↺ Reset</button>
+    <input type="file" id="file-picker" accept=".md,.jsx,.txt,.json" style="display:none;">
   </div>
 
   <div id="road-list">
@@ -260,6 +279,8 @@
       <select id="export-format" style="font-size:10px;padding:1px 4px;background:#1a1e2a;color:#ccc;border:1px solid #334;border-radius:3px;">
         <option value="jsx">JSX</option>
         <option value="vector3">Vector3</option>
+        <option value="json">JSON</option>
+        <option value="brackets">Brackets</option>
       </select>
       <button id="btn-copy-small" style="font-size:10px;padding:2px 7px;">copy</button>
     </div>
@@ -279,6 +300,7 @@
     Right-click point to delete &nbsp;|&nbsp; R-key adds new road<br>
     Double-click or Enter to finish new road &nbsp;|&nbsp; Esc to cancel
   </div>
+  <div id="autosave-indicator">auto-save: off</div>
 </div>
 
 <!-- ── Import modal ────────────────────────────────── -->
@@ -359,7 +381,7 @@ function parseVector3(text) {
   const results = [];
   // Match variable declarations containing arrays of new THREE.Vector3(...)
   // Split on blank lines or variable declarations to separate road arrays
-  const blockRe = /(?:const|let|var)\s+(\w+)\s*=\s*\[([\s\S]*?)\];/g;
+  const blockRe = /(?:const|let|var)\s+(\w+)\s*=\s*\[([\s\S]*?)\];?/g;
   let block;
   while ((block = blockRe.exec(text)) !== null) {
     const varName = block[1];
@@ -385,6 +407,40 @@ function parseVector3(text) {
     }
     if (pts.length >= 2) {
       results.push({ pts, w: 2.5, name: 'curvePoints' });
+    }
+  }
+  return results;
+}
+
+function parseJSON(text) {
+  try {
+    const data = JSON.parse(text);
+    if (!Array.isArray(data)) return [];
+    return data.filter(r => r.points && r.points.length >= 2).map(r => ({
+      pts: r.points,
+      w: r.width || 2.5,
+      name: r.name || ''
+    }));
+  } catch (e) { return []; }
+}
+
+function parseBrackets(text) {
+  const results = [];
+  // Match comment lines followed by bracket arrays
+  const blockRe = /(?:\/\/\s*(.+?)\s*(?:\(width:\s*([0-9.]+)\))?\s*\n)?\s*\[\s*\n([\s\S]*?)\]/g;
+  let m;
+  while ((m = blockRe.exec(text)) !== null) {
+    const name = m[1] || '';
+    const w = m[2] ? parseFloat(m[2]) : 2.5;
+    const body = m[3];
+    const pts = [];
+    const ptRe = /\[\s*([+-]?\d+\.?\d*)\s*,\s*([+-]?\d+\.?\d*)\s*\]/g;
+    let pm;
+    while ((pm = ptRe.exec(body)) !== null) {
+      pts.push([parseFloat(pm[1]), parseFloat(pm[2])]);
+    }
+    if (pts.length >= 2) {
+      results.push({ pts, w, name: name.trim() });
     }
   }
   return results;
@@ -428,9 +484,30 @@ function toVector3() {
   }).join('\n\n');
 }
 
+function toJSON() {
+  return JSON.stringify(roads.map((r, i) => ({
+    name: r.name || `road${i + 1}`,
+    points: r.points.map(p => [Math.round(p[0]*10)/10, Math.round(p[1]*10)/10]),
+    width: r.width
+  })), null, 2);
+}
+
+function toBrackets() {
+  return roads.map((r, i) => {
+    const name = r.name || `road${i + 1}`;
+    const pts = r.points.map(p =>
+      `  [${Math.round(p[0]*10)/10}, ${Math.round(p[1]*10)/10}]`
+    ).join(',\n');
+    return `// ${name} (width: ${r.width})\n[\n${pts}\n]`;
+  }).join('\n\n');
+}
+
 function getOutput() {
   const fmt = document.getElementById('export-format').value;
-  return fmt === 'vector3' ? toVector3() : toJSX();
+  if (fmt === 'vector3') return toVector3();
+  if (fmt === 'json') return toJSON();
+  if (fmt === 'brackets') return toBrackets();
+  return toJSX();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1038,9 +1115,11 @@ document.getElementById('btn-import-cancel').onclick = () => {
 };
 document.getElementById('btn-import-confirm').onclick = () => {
   const text = document.getElementById('import-textarea').value;
-  let parsed = parseJSX(text);
+  let parsed = parseJSON(text);
+  if (parsed.length === 0) parsed = parseJSX(text);
   if (parsed.length === 0) parsed = parseVector3(text);
-  if (parsed.length === 0) { alert('No roads found. Paste BgCurvedRoad JSX or THREE.Vector3 arrays.'); return; }
+  if (parsed.length === 0) parsed = parseBrackets(text);
+  if (parsed.length === 0) { alert('No roads found. Paste BgCurvedRoad JSX, Vector3 arrays, JSON, or bracket arrays.'); return; }
   loadRoads(parsed);
   document.getElementById('import-overlay').classList.remove('open');
 };
@@ -1055,6 +1134,48 @@ function copyToClipboard() {
 }
 document.getElementById('btn-copy').onclick = copyToClipboard;
 document.getElementById('btn-copy-small').onclick = copyToClipboard;
+
+// ── Load file ────────────────────────────────────
+const filePicker = document.getElementById('file-picker');
+document.getElementById('btn-load-file').onclick = () => filePicker.click();
+filePicker.onchange = (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    const text = ev.target.result;
+    let parsed = parseJSON(text);
+    if (parsed.length === 0) parsed = parseJSX(text);
+    if (parsed.length === 0) parsed = parseVector3(text);
+    if (parsed.length === 0) parsed = parseBrackets(text);
+    if (parsed.length === 0) { alert('No roads found in file. Expected BgCurvedRoad JSX, Vector3 arrays, JSON, or bracket arrays.'); return; }
+    loadRoads(parsed);
+    const btn = document.getElementById('btn-load-file');
+    btn.textContent = '✓ Loaded';
+    setTimeout(() => btn.textContent = '📂 Load File', 1500);
+  };
+  reader.readAsText(file);
+  filePicker.value = ''; // allow re-selecting same file
+};
+
+// ── Save file ────────────────────────────────────
+document.getElementById('btn-save-file').onclick = () => {
+  const fmt = document.getElementById('export-format').value;
+  const text = getOutput();
+  const ext = fmt === 'json' ? '.json' : fmt === 'vector3' ? '.js' : fmt === 'brackets' ? '.txt' : '.jsx';
+  const mime = 'text/plain';
+  const blob = new Blob([text], { type: mime });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'roads' + ext;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+  const btn = document.getElementById('btn-save-file');
+  btn.textContent = '✓ Saved';
+  setTimeout(() => btn.textContent = '💾 Save File', 1500);
+};
 
 // ═══════════════════════════════════════════════════════════════
 // Initial load — parse example data embedded below
@@ -1098,11 +1219,91 @@ const EXAMPLE_JSX = `
         <BgCurvedRoad points={[[200, 200], [250, 260], [300, 320]]} width={1.5} />
 `;
 
+// ═══════════════════════════════════════════════════════════════
+// Auto-save (localStorage)
+// ═══════════════════════════════════════════════════════════════
+const AUTOSAVE_KEY = 'road_manipulator_autosave';
+const AUTOSAVE_INTERVAL = 30000; // 30 seconds
+
+function getAutoSaveData() {
+  return JSON.stringify(roads.map(r => ({
+    points: r.points,
+    width: r.width,
+    name: r.name || ''
+  })));
+}
+
+function autoSave() {
+  if (roads.length === 0) return;
+  try {
+    localStorage.setItem(AUTOSAVE_KEY, getAutoSaveData());
+    const ind = document.getElementById('autosave-indicator');
+    const now = new Date();
+    const time = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    ind.textContent = `auto-saved ${time}`;
+    ind.classList.add('flash');
+    setTimeout(() => ind.classList.remove('flash'), 1000);
+  } catch (e) {
+    console.warn('Auto-save failed:', e);
+  }
+}
+
+function loadAutoSave() {
+  try {
+    const data = localStorage.getItem(AUTOSAVE_KEY);
+    if (!data) return false;
+    const parsed = JSON.parse(data);
+    if (!Array.isArray(parsed) || parsed.length === 0) return false;
+    const valid = parsed.filter(r => r.points && r.points.length >= 2);
+    if (valid.length === 0) return false;
+    loadRoads(valid.map(r => ({ pts: r.points, w: r.width, name: r.name || '' })));
+    return true;
+  } catch (e) {
+    console.warn('Auto-save load failed:', e);
+    return false;
+  }
+}
+
+function clearAutoSave() {
+  localStorage.removeItem(AUTOSAVE_KEY);
+  const ind = document.getElementById('autosave-indicator');
+  ind.textContent = 'auto-save: cleared';
+}
+
+let autoSaveTimer = null;
+function startAutoSave() {
+  if (autoSaveTimer) clearInterval(autoSaveTimer);
+  autoSaveTimer = setInterval(autoSave, AUTOSAVE_INTERVAL);
+  const ind = document.getElementById('autosave-indicator');
+  ind.textContent = 'auto-save: on';
+}
+
+// Reset button — clear auto-save and reload example data
+document.getElementById('btn-reset-data').onclick = () => {
+  if (!confirm('Clear auto-saved data and reload example roads?')) return;
+  clearAutoSave();
+  loadRoads(parseJSX(EXAMPLE_JSX));
+  const btn = document.getElementById('btn-reset-data');
+  btn.textContent = '✓ Reset';
+  setTimeout(() => btn.textContent = '↺ Reset', 1500);
+};
+
+// Also auto-save when the user navigates away
+window.addEventListener('beforeunload', () => {
+  if (roads.length > 0) {
+    try { localStorage.setItem(AUTOSAVE_KEY, getAutoSaveData()); } catch(e) {}
+  }
+});
+
 // ── Boot ──────────────────────────────────────────────────────
 window.addEventListener('load', () => {
   resizeCanvas();
-  loadRoads(parseJSX(EXAMPLE_JSX));
+  const restored = loadAutoSave();
+  if (!restored) {
+    loadRoads(parseJSX(EXAMPLE_JSX));
+  }
   setMode('select');
+  startAutoSave();
 });
 window.addEventListener('resize', resizeCanvas);
 </script>
